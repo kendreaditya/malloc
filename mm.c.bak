@@ -5,52 +5,22 @@
  *
  * Overview:
  * Here we implement a simplistic version of malloc, free, realloc and calloc. The
- * allocator uses a structure named divider to represent headers ( and footers in the
- * of free blocks). This structure contains information about the size, allocation
+ * allocator uses a structure named divider to represent both headers and footers of
+ * allocated blocks. This structure contains information about the size, allocation
  * status, and whether the neighboring blocks are allocated or not. Additionally, the
  * structure is designed to be 8 bytes in size to ensure that the heap is aligned to
- * 16 bytes.
+ * 8 bytes.
  *
- * Initiliazation:
  * When initialized, the heap is allocated with a prologue and an epilogue. The
- * prologue consists of a header marking the beginning of the heap, while the
- * epilogue signifies the end of the heap. The main function of these blocks is
- * to decrease the instances of edge cases.
+ * prologue consists of a header and footer marking the beginning of the heap,
+ * while the epilogue signifies the end of the heap. The main function of these
+ * blocks is to decrease the instances of edge cases.
  *
- * Malloc:
- * The malloc function searches for a free block through free lists categorized by
- * size in the heap. This categorization allows for quicker allocation by reducing
- * the search space. Rather than scanning through the entire heap, the allocator can
- * focus on the subset of blocks that are likely to fulfill the size requirement.
- * This optimization significantly improves allocation time, especially in large
- * heaps with many small free blocks. Furthermore, malloc extends the heap when
- * necessary based on the size requirement. This extension prevents frequent
- * system calls for heap expansion, which can be costly in terms of performance.
- *
- * Free:
- * The free function updates the allocation status of a block in the header and
- * creates a footer. This optimization allows for efficient tracking of allocated
- * and free blocks within the heap. By maintaining accurate metadata, the allocator
- * can quickly identify free blocks for reuse during subsequent allocation requests.
- *
- * The Free function also coalesces blocks with neighboring free blocks.
- * This optimization prevents fragmentation by merging adjacent free blocks
- * into larger contiguous blocks. Coalescing reduces the number of small,
- * unusable fragments in the heap, making it easier to satisfy large allocation
- * requests.
- *
- * Once a block is freed, it is added to a segregated free list based on its size.
- * Segregating free blocks based on size allows for more efficient allocation
- * strategies. Small blocks can be reused for small allocation requests, reducing
- * fragmentation and overhead associated with larger blocks. This optimization
- * improves overall memory utilization and reduces allocation throughput.
- *
- * Realloc:
- * The realloc function allocates a new block, transfers data from the old block, 
- * and subsequently frees the old block. This optimization avoids unnecessary copying 
- * of data when resizing memory blocks. Instead of allocating a new block, realloc 
- * modifies the existing block if it has sufficient space or allocates a new block 
- * only when necessary.
+ * The malloc function searches for a free block in the heap or extends the heap
+ * if necessary based on the size requirement. The free function, on the other hand,
+ * updates the allocation status of a block in the header and footer. The realloc
+ * function is implemented to allocate a new block, transfer data from the
+ * old block, and subsequently free the old block.
  *
  * Divider Structure:
  * +--------------------------+---+---+---+---+
@@ -60,23 +30,25 @@
  * +--------------------------+---+---+---+---+
  *
  * Heap Example:
- *            <-Allocated Block-><----------------Free Block---------------->
- * +----------+----------+------+----------+---------------------+----------+----------+
- * |  Pr Hdr  |  Header  | Data |  Header  |      Free Block     |  Footer  |  Ep Hdr  |
- * +----------+----------+------+----------+---------------------+----------+----------+
- * |  S  |APNE|  S  |APNE| .... |  S  |APNE|    PREV*  |  NEXT*  |  S  |APNE|  S  |APNE|
- * +----------+----------+------+----------+---------------------+----------+----------+
+ * +-----------------+-----------------+-----------------+-----------------+---------+-----------------+-----------------+
+ * |     Padding     | Prologue Header | Prologue Footer |      Header     |   Data  |      Footer     | Epilogue Header |
+ * +-----------------+-----------------+-----------------+-----------------+---------+-----------------+-----------------+
+ * |                 |   Size  |A|P|N|E|   Size  |A|P|N|E|   Size  |A|P|N|E|   ....  |   Size  |A|P|N|E|   Size  |A|P|N|E|
+ * +-----------------+-----------------+-----------------+-----------------+---------+-----------------+-----------------+
  *
  * where ...
- *  S: Size of the block (with header, data, and footer)
+ *  Size: Size of the block (with header, data, and footer)
  *  A: Allocation status
  *  P: Previous block allocation status
  *  N: Next block allocation status
  *  E: Epilogue flag
- *  PREV*: Pointer to the previous free block
- *  NEXT*: Pointer to the next free block
+ * 
+ * Coalescing:
+ * TODO: Add description
+ * 
+ * Free List:
+ * TODO: Add description
  */
-
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -118,7 +90,7 @@
 
 #define ALIGNMENT 16
 
-// Rounds up to the nearest multiple of ALIGNMENT
+// rounds up to the nearest multiple of ALIGNMENT
 static size_t align(size_t x)
 {
     return ALIGNMENT * ((x+ALIGNMENT-1)/ALIGNMENT);
@@ -148,11 +120,11 @@ typedef struct free_block {
     struct free_block *next_free_block; // Pointer to the next free block
 } free_block;
 
+uint64_t free_list_sizes[5] = {48, 64, 96, 264, 2916};
 void *heap; // Pointer to the first byte of the heap
+// Segregated free list sizes: 48, 64, 96, 264, 2916
+free_block *free_lists[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
 
-# define SEGRAGATED_SIZES 6 // Number of free lists
-uint64_t free_list_sizes[SEGRAGATED_SIZES-1] = {32, 48, 64, 96, 2916}; // Sizes for each free list
-free_block *free_lists[SEGRAGATED_SIZES]; // Array of free lists
 
 
 /*
@@ -168,7 +140,6 @@ static bool in_heap(const void* p)
 {
     return p <= mm_heap_hi() && p >= mm_heap_lo();
 }
-
 /**
  * Creates a divider struct with specified attributes for use as header or footer.
  *
@@ -182,7 +153,7 @@ static bool in_heap(const void* p)
  * Returns:
  * divider: A divider struct with the specified attributes.
  */
-static divider make_divider(uint64_t size, bool alloc, bool prev_alloc, bool next_alloc, bool epilogue)
+divider make_divider(uint64_t size, bool alloc, bool prev_alloc, bool next_alloc, bool epilogue)
 {
     return (divider) {
         .size = size,
@@ -201,11 +172,8 @@ static divider make_divider(uint64_t size, bool alloc, bool prev_alloc, bool nex
  *
  * Returns:
  * divider*: Pointer to the footer of the corresponding memory block.
- * 
- * Assumptions:
- * - The header is a valid pointer to a memory block and is not NULL.
  */
-static divider *footer_from_header(divider *header)
+divider *footer_from_header(divider *header)
 {
     return (divider *)((uint8_t *)header + header->size - DIVIDER_SIZE);
 }
@@ -218,11 +186,8 @@ static divider *footer_from_header(divider *header)
  *
  * Returns:
  * divider*: Pointer to the header of the corresponding memory block.
- * 
- * Assumptions:
- * - The ptr is a valid pointer to a memory block and is not NULL.
  */
-static divider *header_from_data(void *ptr)
+divider *header_from_data(void *ptr)
 {
     return (divider *)((uint8_t *)ptr - DIVIDER_SIZE);
 }
@@ -232,14 +197,11 @@ static divider *header_from_data(void *ptr)
  *
  * Parameters:
  * header (divider*): Pointer to the header of a memory block.
- * 
+ *
  * Returns:
  * void*: Pointer to the data section within the memory block.
- * 
- * Assumptions:
- * - The header is a valid pointer to a memory block and is not NULL.
  */
-static void *data_from_header(divider *header)
+void *data_from_header(divider *header)
 {
     return (void *)((uint8_t *)header + DIVIDER_SIZE);
 }
@@ -252,49 +214,23 @@ static void *data_from_header(divider *header)
  *
  * Returns:
  * divider*: Pointer to the header of the next memory block.
- * 
- * Assumptions:
- * - The header is a valid pointer to a memory block and is not NULL.
  */
-static divider *header_to_header(divider *header)
+divider *header_to_header(divider *header)
 {
     return (divider *)((uint8_t *)header + header->size);
 }
 
-/**
- * Calculates the header address of the previous block based on the current block's header address.
- * 
- * Parameters:
- * header (divider*): Pointer to the header of a memory block.
- * 
- * Returns:
- * divider*: Pointer to the header of the previous memory block.
- * 
- * Assumptions:
- * - The header is a valid pointer to a memory block and is not NULL.
- */
-static free_block* free_block_from_header(divider *header) {
+free_block* free_block_from_header(divider *header) {
     return (free_block *)((uint8_t *)header + DIVIDER_SIZE);
 }
 
-/**
- * Finds the free list for a given size.
- * 
- * Parameters:
- * size (size_t): The size of the memory block.
- * 
- * Returns:
- * free_block**: Pointer to the free list for the given size.
-*/
-static free_block** find_free_list(size_t size) {
-    for (int i = 0; i < SEGRAGATED_SIZES-1; i++) {
+free_block** find_free_list(size_t size) {
+    for (int i = 0; i < 5; i++) {
         if (size <= free_list_sizes[i]) {
             return &free_lists[i];
         }
     }
-
-    // If the size is greater than the largest free list size, returns the largest free list
-    return &free_lists[SEGRAGATED_SIZES-1];
+    return &free_lists[5];
 }
 
 /**
@@ -311,14 +247,12 @@ static free_block** find_free_list(size_t size) {
 */
 free_block* add_to_free_list(divider *header)
 {
-    // Find the free list for the given size
     free_block **free_list = find_free_list(header->size);
 
     free_block *new_free_block = (free_block *)((uint8_t *)header + DIVIDER_SIZE);
     new_free_block->prev_free_block = NULL;
     new_free_block->next_free_block = *free_list;
     
-    // If the free list is not empty, updates the previous free block's next pointer
     if (*free_list != NULL) {
         (*free_list)->prev_free_block = new_free_block;
     }
@@ -345,13 +279,10 @@ void remove_from_free_list(divider *header)
     free_block *prev_free_block = current_free_block->prev_free_block;
     free_block *next_free_block = current_free_block->next_free_block;
 
-    // If the current block is the first block in the free list, updates the free list pointer
     if (prev_free_block != NULL) {
         prev_free_block->next_free_block = next_free_block;
-    
-    // If the current block is the last block in the free list, updates the free list pointer
     } else {
-        for(int i = 0; i < SEGRAGATED_SIZES; i++) {
+        for(int i = 0; i < 6; i++) {
             if (free_lists[i] == current_free_block) {
                 free_lists[i] = next_free_block;
             }
@@ -359,7 +290,6 @@ void remove_from_free_list(divider *header)
     }
 
     if (next_free_block != NULL) {
-        // Updates the next block's previous pointer
         next_free_block->prev_free_block = prev_free_block;
     }
 }
@@ -376,7 +306,7 @@ void remove_from_free_list(divider *header)
  */
 bool mm_init(void)
 {
-    heap = mm_sbrk(2 * DIVIDER_SIZE);
+    heap = mm_sbrk(4 * sizeof(uint64_t));
 
     if (heap == (void *)-1)
     {
@@ -384,35 +314,23 @@ bool mm_init(void)
     }
 
     // Create prologue header and set attributes with padding
-    divider *prologue_header = (divider *)((uint8_t *)heap);
-    *prologue_header = make_divider(DIVIDER_SIZE, true, true, true, false);
+    divider *prologue_header = (divider *)((uint8_t *)heap + DIVIDER_SIZE);
+    *prologue_header = make_divider(sizeof(divider) + sizeof(divider), true, true, true, false);
+
+    // Create prologue footer
+    divider *prologue_footer = footer_from_header(prologue_header);
+    *prologue_footer = make_divider(sizeof(divider) + sizeof(divider), true, true, true, false);
 
     // Create epilogue header
-    divider *epilogue_header = (divider *)((uint8_t *)prologue_header + DIVIDER_SIZE);
+    divider *epilogue_header = (divider *)((uint8_t *)prologue_footer + DIVIDER_SIZE);
     *epilogue_header = make_divider(0, true, true, true, true);
 
-    // Clear the free lists
-    for (int i = 0; i < SEGRAGATED_SIZES; i++) {
+    // Create free list for each size
+    for (int i = 0; i < 6; i++) {
         free_lists[i] = NULL;
     }
 
     return true;
-}
-
-/**
- * Checks if a given block has a footer.
- * 
- * Parameters:
- * header (divider*): Pointer to the header of a memory block.
- * 
- * Returns:
- * bool: True if the block has a footer, false otherwise.
- * 
- * Assumptions:
- * - The header is a valid pointer to a memory block and is not NULL.
-*/
-static bool has_footer(divider *header) {
-    return !header->alloc;
 }
 
 /**
@@ -431,33 +349,29 @@ static bool has_footer(divider *header) {
 divider* change_alloc(divider *header, divider dummy_divider)
 {
     *header = dummy_divider;
-    if (has_footer(header)) {
-        divider *footer = footer_from_header(header);
-        *footer = dummy_divider;
-    }
+    divider *footer = footer_from_header(header);
+    *footer = dummy_divider;
 
     // Marks the next block's previous allocation status and epilogue flag.
-    divider *next_header = header_to_header(header);
+    divider *next_header = (divider *)((uint8_t *)footer + DIVIDER_SIZE);
     *next_header = make_divider(next_header->size, next_header->alloc, header->alloc, next_header->next_alloc, next_header->epilogue);
 
     // If the next block is not an epilogue, updates its footer with the same information as the header.
-    if (!next_header->epilogue && has_footer(next_header))
+    if (!next_header->epilogue)
     {
         divider *next_footer = footer_from_header(next_header);
         *next_footer = *next_header;
     }
 
-    if (!header->prev_alloc) {
-        // Marks the previous block's next allocation status and epilogue flag.
-        divider *prev_footer = (divider *)((uint8_t *)header - DIVIDER_SIZE);
-        *prev_footer = make_divider(prev_footer->size, prev_footer->alloc, prev_footer->prev_alloc, header->alloc, prev_footer->epilogue);
+    // Marks the previous block's next allocation status and epilogue flag.
+    divider *prev_footer = (divider *)((uint8_t *)header - DIVIDER_SIZE);
+    *prev_footer = make_divider(prev_footer->size, prev_footer->alloc, prev_footer->prev_alloc, header->alloc, prev_footer->epilogue);
 
-        // Marks the previous block's allocation status.
-        divider *prev_header = (divider *)((uint8_t *)prev_footer - prev_footer->size + DIVIDER_SIZE);
-        *prev_header = *prev_footer;
-    }
+    // Marks the previous block's allocation status.
+    divider *prev_header = (divider *)((uint8_t *)prev_footer - prev_footer->size + DIVIDER_SIZE);
+    *prev_header = *prev_footer;
 
-    return has_footer(header) ? footer_from_header(header) : NULL;
+    return footer;
 }
 
 /**
@@ -473,16 +387,21 @@ divider* change_alloc(divider *header, divider dummy_divider)
 divider* split(divider *header, size_t size)
 {
     divider old_header = *header;
+    old_header = old_header;
     divider* old_footer = footer_from_header(header);
 
     // Update the header and create footer with the new size and allocation status
     *header = make_divider(size, true, header->prev_alloc, false, header->epilogue);
+    divider *new_footer = footer_from_header(header);
+    *new_footer = *header;
 
     // Calculate the new size of the remaining block
+    // TODO: Check why the old_footer->size is not working and is giving wrong size
+    // uint64_t remaining_size = old_footer->size - size;
     uint64_t remaining_size = old_header.size - size;
 
     // Create a new header with the remaining size and update the old footer
-    divider *new_header = header_to_header(header);
+    divider *new_header = (divider *)((uint8_t *)new_footer + DIVIDER_SIZE);
     *new_header = make_divider(remaining_size, false, header->alloc, old_header.next_alloc, header->epilogue);
     *old_footer = *new_header;
 
@@ -521,30 +440,30 @@ divider* header_from_free_block(free_block *free_block) {
  * Returns:
  * divider*: Pointer to the header of the allocated space, or NULL if no suitable space found.
  */
-divider *find_free_space(size_t size) {
+divider *find_free_space(size_t size)
+{
+    double best_fit_margin = .15;
 
-    // Optimization to find close fit while maximizing throughput
-    double best_fit_margin = 0.225;
-
-    for (int i = 0; i < SEGRAGATED_SIZES; i++) {
-        // In all cases, the last free list should be checked if a free block is not found in the previous free lists
-        if (i == SEGRAGATED_SIZES-1 || size <= free_list_sizes[i]) {
-
+    for (int i = 0; i < 6; i++) {
+        if (i == 5 || size <= free_list_sizes[i]) {
             free_block *current_free_block = free_lists[i];
             free_block *best_fit = NULL;
 
-            // Find potential free blocks in the free list
-            while (current_free_block != NULL) {
+            while (current_free_block != NULL)
+            {
                 // Calculate the header of the current free block
                 divider *current_header = header_from_free_block(current_free_block);
 
-                if (in_heap(current_free_block) && !current_header->alloc && current_header->size >= size) {
+                if (in_heap(current_free_block) && !current_header->alloc && current_header->size >= size)
+                {
                     // If the current block is free and has sufficient size, update the best fit block
-                    if (best_fit == NULL || current_header->size < header_from_free_block(best_fit)->size) {
+                    if (best_fit == NULL || current_header->size < header_from_free_block(best_fit)->size)
+                    {
                         best_fit = current_free_block;
 
                         // Check if current_free_block is withint the best_fit_margin of the requested size
-                        if (current_header->size >= size && current_header->size <= size + (size * best_fit_margin)) {
+                        if (current_header->size >= size && current_header->size <= size + (size * best_fit_margin))
+                        {
                             break;
                         }
                     }
@@ -554,16 +473,21 @@ divider *find_free_space(size_t size) {
                 current_free_block = current_free_block->next_free_block;
             }
 
-            // If a good fit was found and has sufficient size
-            if (best_fit != NULL) {
+            // Check if the current block is free and has sufficient size
+            if (best_fit != NULL)
+            {
                 divider *current_header = header_from_free_block(best_fit);
-                if (in_heap(best_fit) && !current_header->alloc && current_header->size >= size) {
+                if (in_heap(best_fit) && !current_header->alloc && current_header->size >= size)
+                {
                     // Split the block if it is larger than the requested size to account for new header size
-                    if (current_header->size > size + DIVIDER_SIZE + sizeof(free_block)) {
+                    if (current_header->size > size + DIVIDER_SIZE + sizeof(free_block))
+                    {
                         split(current_header, size);
 
                         // Update header and footer with allocation status
-                    } else {
+                    }
+                    else
+                    {
                         change_alloc(current_header, make_divider(current_header->size, true, current_header->prev_alloc, current_header->next_alloc, current_header->epilogue));
                     }
 
@@ -594,7 +518,8 @@ divider *increase_heap(size_t size)
 {
     void *extended_heap = mm_sbrk(size);
 
-    if (extended_heap == (void *)-1) {
+    if (extended_heap == (void *)-1)
+    {
         return NULL;
     }
 
@@ -602,8 +527,12 @@ divider *increase_heap(size_t size)
     divider *current_header = (divider *)((uint8_t *)extended_heap - DIVIDER_SIZE);
     *current_header = make_divider(size, true, true, true, false);
 
+    // Calculate the initalize the footer position
+    divider *current_footer = footer_from_header(current_header);
+    *current_footer = make_divider(size, true, true, true, false);
+
     // Calculate and initalize the epilogue header position
-    divider *epilogue_header = header_to_header(current_header);
+    divider *epilogue_header = (divider *)((uint8_t *)current_footer + DIVIDER_SIZE);
     *epilogue_header = make_divider(0, true, true, true, true);
 
     change_alloc(current_header, *current_header);
@@ -627,15 +556,13 @@ divider *increase_heap(size_t size)
  */
 void *malloc(size_t size)
 {
-    if (size == 0) {
+    if (size == 0)
+    {
         return NULL;
     }
 
     // Align the size and add space for headers and footers.
-    size = align(size +  DIVIDER_SIZE);
-
-    // Set minimum size to 32 bytes (header 8 bytes + free block 16 bytes + footer 8 bytes)
-    size = size < 32 ? 32 : size;
+    size = align(size) + 2 * DIVIDER_SIZE;
 
     divider *free_header = find_free_space(size);
 
@@ -669,12 +596,10 @@ void *malloc(size_t size)
 divider* coalesce(divider *header, divider *footer)
 {
     // Calculate the new size of the coalesced block
-    uint64_t new_size = (uint8_t*)footer - (uint8_t*)header;
+    uint64_t new_size = (uint8_t*)footer - (uint8_t*)header + DIVIDER_SIZE;
 
     *header = make_divider(new_size, false, header->prev_alloc, footer->next_alloc, header->epilogue);
-    if (has_footer(header)) {
-        *footer_from_header(header) = *header;
-    }
+    *footer = *header;
 
     // Update the header and footer with the new size and allocation status
     change_alloc(header, *header);
@@ -692,37 +617,42 @@ divider* coalesce(divider *header, divider *footer)
  */
 void free(void *ptr)
 {
-    if (ptr == NULL) {
+    if (ptr == NULL)
+    {
         return;
     }
 
     // Marks the memory block as unallocated by updating the header and footer.
     divider *current_header = header_from_data(ptr);
-    divider *next_header = header_to_header(current_header);
-    *current_header = make_divider(current_header->size, false, current_header->prev_alloc, next_header->alloc, current_header->epilogue);
-    if (has_footer(current_header)) {
-        *footer_from_header(current_header) = *change_alloc(current_header, *current_header);
-    }
+    divider *current_footer = change_alloc(current_header,
+                                            make_divider(current_header->size,
+                                            false,
+                                            current_header->prev_alloc,
+                                            current_header->next_alloc,
+                                            current_header->epilogue));
 
     // Calculates the previous and next block's header and footer                                            
     divider *prev_footer = (divider *)((uint8_t *)current_header - DIVIDER_SIZE);
     divider *prev_header = (divider *)((uint8_t *)prev_footer - prev_footer->size + DIVIDER_SIZE);
+    divider *next_header = (divider *)((uint8_t *)current_footer + DIVIDER_SIZE);
 
     // Coalesces the current block with the previous and next blocks if they are both free
     if (!current_header->prev_alloc && !current_header->next_alloc && !next_header->epilogue) {
+        divider *next_footer = footer_from_header(next_header);
         remove_from_free_list(prev_header);
         remove_from_free_list(next_header);
-        current_header = coalesce(prev_header, header_to_header(next_header));
+        current_header = coalesce(prev_header, next_footer);
 
     // Coalesces the current block with the previous block if it is free (when the next block is allocated)
     } else if (!current_header->prev_alloc) {
         remove_from_free_list(prev_header);
-        current_header = coalesce(prev_header, header_to_header(current_header));
+        current_header = coalesce(prev_header, current_footer);
 
     // Coalesces the current block with the next block if it is free (when the previous block is allocated)
     } else if (!current_header->next_alloc) {
+        current_footer = footer_from_header(next_header);
         remove_from_free_list(next_header);
-        current_header = coalesce(current_header, header_to_header(next_header));
+        current_header = coalesce(current_header, current_footer);
     } 
 
     // Adds the current block to the free list
@@ -751,7 +681,7 @@ bool transfer(divider *old_header, divider *new_header)
     void *old_data_start = data_from_header(old_header);
 
     // Determine the data transfer size cutoff
-    uint64_t transfer_size = (old_header->size < new_header->size) ? old_header->size - DIVIDER_SIZE : new_header->size - DIVIDER_SIZE;
+    uint64_t transfer_size = (old_header->size < new_header->size) ? old_header->size - (2 * sizeof(divider)) : new_header->size - (2 * sizeof(divider));
 
     memcpy(new_data_start, old_data_start, transfer_size);
 
@@ -785,7 +715,7 @@ void *realloc(void *oldptr, size_t size)
     }
 
     // If the existing block is large enough, return the original pointer
-    if (header_from_data(oldptr)->size - (DIVIDER_SIZE) >= size)
+    if (header_from_data(oldptr)->size - (2 * DIVIDER_SIZE) >= size)
     {
         return oldptr;
     }
@@ -799,10 +729,6 @@ void *realloc(void *oldptr, size_t size)
     }
 
     free(oldptr);
-
-    #ifdef DEBUG
-    mm_checkheap(__LINE__);
-    #endif // DEBUG
 
     return data_from_header(new_header);
 }
@@ -875,76 +801,41 @@ bool compare_divider(divider *header, divider *footer)
  */
 bool traverse_heap()
 {
-    divider *current_header = header_to_header((divider *)(heap));
+    divider *current_header = (divider *)(heap + sizeof(divider));
 
     while (!current_header->epilogue)
     {
-        // Checks if the current block is in the heap
-        if (!in_heap(current_header))
+        dbg_printf("Checking block at header: %p\n", current_header);
+        if (compare_divider(current_header, (current_header + current_header->size - sizeof(divider))))
         {
-            dbg_printf("This block is not in the heap (%p)\n", current_header);
+            dbg_printf("Header and footer do not match at %p and %p\n", current_header, (current_header + current_header->size - sizeof(divider)));
             return false;
         }
 
-        // Checks if the current block's header and footer match only if the block is free
-        if (!current_header->alloc && !compare_divider(current_header, footer_from_header(current_header)))
-        {
-            dbg_printf("Free block Header and footer do not match at %p and %p\n", current_header, (current_header + current_header->size - sizeof(divider)));
-            return false;
-        }
-
-        // Checks all free blocks are in the free list
-        if (!current_header->alloc)
-        {
-            free_block *current_free_block = *find_free_list(current_header->size);
-            bool found = false;
-            while (current_free_block != NULL)
-            {
-                if (header_from_free_block(current_free_block) == current_header)
-                {
-                    found = true;
-                    break;
-                }
-                current_free_block = current_free_block->next_free_block;
-            }
-            if (!found)
-            {
-                dbg_printf("This free block should be in the free list or is no in the right free list (%p)\n", current_header);
-                return false;
-            }
-        }
-
-        // Ensures no blocks overlap
-        current_header = header_to_header(current_header);
+        current_header = (divider *)((uint8_t *)current_header + current_header->size);
     }
+
+    dbg_printf("Epilogue block at %p\n", current_header);
 
     return true;
 }
 
-/**
- * Traverses the free list, checking invariants for each free block.
- *
- * Returns:
- * bool: True if invariants hold for all free blocks, false otherwise.
- */
 bool tranverse_free_list()
 {
-    for (int i = 0; i < SEGRAGATED_SIZES; i++)
+    free_block *current_free_block = free_lists[0];
+
+    while (current_free_block != NULL)
     {
-        free_block *current_free_block = free_lists[i];
-
-        while (current_free_block != NULL)
+        dbg_printf("Checking free block at %p\n", current_free_block);
+        if (!in_heap(current_free_block))
         {
-            divider *current_header = header_from_free_block(current_free_block);
-            if (!in_heap(current_free_block) || current_header->alloc)
-            {
-                dbg_printf("This free block should not exist (%p)\n", current_free_block);
-                return false;
-            }
-
-            current_free_block = current_free_block->next_free_block;
+            dbg_printf("Free block not in heap at %p\n", current_free_block);
+            return false;
         }
+
+        current_free_block = current_free_block->next_free_block;
     }
+
     return true;
 }
 
@@ -966,12 +857,23 @@ bool mm_checkheap(int line_number)
     {
         return false;
     }
+    // dbg_printf("Heap is consistent at line %d\n", line_number);
 
-    // Ensures all free blocks in the free list are free
     if (!tranverse_free_list())
     {
         return false;
     }
+    // dbg_printf("Free list is consistent at line %d\n", line_number);
+
+    /* TODO: Write a real heap checker
+    * Is every block in the free list marked as free?
+    * Are there any contiguous free blocks that somehow escaped coalescing?
+    * Is every free block actually in the free list?
+    * Do the pointers in the free list point to valid free blocks?
+    * Do any allocated blocks overlap?
+    * Do the pointers in a heap block point to valid heap addresses?
+    */
+
 #endif // DEBUG
 
     return true;
