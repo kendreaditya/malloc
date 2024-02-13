@@ -16,6 +16,14 @@ The `free` function updates the allocation status of a block and creates a foote
 The `realloc` function reallocates a new block, transfers data from the old block, and subsequently frees the old block. This optimization avoids unnecessary copying of data when resizing memory blocks. It modifies the existing block if sufficient space is available, allocating a new block only when necessary.
 
 ## Divider Structure
+```
++--------------------------+---+---+---+---+
+|           Size           | A | P | N | E |
++--------------------------+---+---+---+---+
+|          60 bits         | 1 | 1 | 1 | 1 |
++--------------------------+---+---+---+---+
+```
+
 The divider structure consists of:
 - Size: 60 bits for block size
 - A: Allocation status
